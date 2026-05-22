@@ -1,20 +1,26 @@
 @import "tailwindcss";
 
+/* Class-based dark mode: apply `.dark` to <html> */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
 }
 
 @layer base {
   body {
-    @apply bg-[#FBFBFB] text-[#1A1A1A] antialiased;
+    @apply bg-[#F7F7F7] text-[#1A1A1A] antialiased;
+  }
+  html.dark body {
+    background-color: #111111;
+    color: #f5f5f7;
   }
 }
 
 .glass-card {
-  @apply bg-white/70 backdrop-blur-md border border-white/20 shadow-sm;
+  @apply bg-white/70 dark:bg-gray-900/70 backdrop-blur-md border border-white/20 dark:border-gray-700/20 shadow-sm;
 }
 
 .task-item {
   @apply transition-all duration-200 ease-out;
 }
-
