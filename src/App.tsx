@@ -2,13 +2,14 @@ import { useState, useEffect, useRef, type ChangeEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Plus, Trash2, CheckCircle2, Circle,
-  Bell, X, Clock, Download, Upload, Calendar, RotateCcw,
+  Bell, BellOff, X, Clock, Download, Upload, Calendar, RotateCcw,
   Moon, Sun, Pencil, Copy, Clipboard, Search,
 } from 'lucide-react';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type TaskStage = 'now' | 'next' | 'later' | 'done';
+type NotifPermission = 'granted' | 'denied' | 'default' | 'unsupported';
 
 interface Task {
   id: string;
@@ -25,6 +26,7 @@ interface Task {
 
 const STORAGE_KEY = 'zentask_tasks';
 const THEME_KEY = 'zentask_theme';
+const NOTIFIED_KEY = 'zentask_notified_reminders';
 const VALID_STAGES: TaskStage[] = ['now', 'next', 'later', 'done'];
 
 const SECTIONS: { stage: Exclude<TaskStage, 'done'>; label: string; empty: string }[] = [
@@ -65,7 +67,7 @@ function formatDue(dateStr: string): { label: string; overdue: boolean } {
 }
 
 function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
 function tsToTimeStr(ts: number): string {
@@ -90,10 +92,86 @@ function sortByOverdue(items: Task[]): Task[] {
   });
 }
 
+// ── Notification helpers ──────────────────────────────────────────────────────
+
+function getNotifPermission(): NotifPermission {
+  if (!('Notification' in window)) return 'unsupported';
+  return Notification.permission as NotifPermission;
+}
+
+function formatReminderLabel(ts: number): string {
+  const now = Date.now();
+  if (ts <= now) return 'overdue';
+  const d = new Date(ts);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.floor((d.getTime() - today.getTime()) / 86_400_000);
+  const time = formatTime(ts);
+  if (diffDays === 0) return `today ${time}`;
+  if (diffDays === 1) return `tomorrow ${time}`;
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
+}
+
+function notifKey(taskId: string, reminderTime: number): string {
+  return `${taskId}:${reminderTime}`;
+}
+
+function loadNotifiedSet(): Set<string> {
+  try {
+    const raw = localStorage.getItem(NOTIFIED_KEY);
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveNotifiedSet(set: Set<string>): void {
+  try {
+    localStorage.setItem(NOTIFIED_KEY, JSON.stringify([...set]));
+  } catch { /* ignore */ }
+}
+
+function pruneNotifiedSet(): void {
+  const cutoff = Date.now() - 2 * 86_400_000;
+  const set = loadNotifiedSet();
+  const pruned = new Set<string>();
+  for (const key of set) {
+    const ts = parseInt(key.slice(key.lastIndexOf(':') + 1), 10);
+    if (!Number.isNaN(ts) && ts > cutoff) pruned.add(key);
+  }
+  saveNotifiedSet(pruned);
+}
+
+async function fireTaskNotification(task: Omit<Task, 'stage'> & { stage: TaskStage }): Promise<void> {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const title = 'ZenTask reminder';
+  const stageLabel = task.stage !== 'done'
+    ? `[${task.stage.charAt(0).toUpperCase() + task.stage.slice(1)}] `
+    : '';
+  const options: NotificationOptions = {
+    body: `${stageLabel}${task.text}`,
+    icon: '/icon-192x192.png',
+    badge: '/favicon-32x32.png',
+    tag: task.id,
+  };
+  if (navigator.serviceWorker?.controller) {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      await reg.showNotification(title, options);
+      return;
+    } catch { /* fall through */ }
+  }
+  try {
+    const n = new Notification(title, options);
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch { /* ignore */ }
+}
+
 // ── TaskRow ───────────────────────────────────────────────────────────────────
 
 interface RowProps {
   task: Task;
+  notifPermission: NotifPermission;
   onMarkDone: (id: string) => void;
   onReopen: (id: string) => void;
   onSetStage: (id: string, stage: TaskStage) => void;
@@ -102,25 +180,21 @@ interface RowProps {
   onDuplicate: (id: string) => void;
 }
 
-function TaskRow({ task, onMarkDone, onReopen, onSetStage, onDelete, onUpdateTask, onDuplicate }: RowProps) {
+function TaskRow({
+  task, notifPermission,
+  onMarkDone, onReopen, onSetStage, onDelete, onUpdateTask, onDuplicate,
+}: RowProps) {
   const done = task.stage === 'done';
   const due = task.dueDate ? formatDue(task.dueDate) : null;
-  const reminderPast =
-    !done && task.reminderTime && task.reminderTime <= Date.now() && !task.reminderDismissed;
+  const reminderPast = !done && !!task.reminderTime && task.reminderTime <= Date.now();
 
   const [showEdit, setShowEdit] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [editTitle, setEditTitle] = useState('');
 
-  useEffect(() => {
-    if (done) setShowEdit(false);
-  }, [done]);
+  useEffect(() => { if (done) setShowEdit(false); }, [done]);
 
-  const startEditTitle = () => {
-    setEditTitle(task.text);
-    setEditingTitle(true);
-  };
-
+  const startEditTitle = () => { setEditTitle(task.text); setEditingTitle(true); };
   const saveTitle = () => {
     const trimmed = editTitle.trim();
     if (trimmed) onUpdateTask(task.id, { text: trimmed });
@@ -189,28 +263,19 @@ function TaskRow({ task, onMarkDone, onReopen, onSetStage, onDelete, onUpdateTas
           {(due || (task.reminderTime && !done)) && (
             <div className="flex flex-wrap items-center gap-3 mt-1.5">
               {due && (
-                <span
-                  className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${
-                    due.overdue
-                      ? 'text-amber-500 dark:text-amber-400'
-                      : 'text-gray-400 dark:text-gray-500'
-                  }`}
-                >
+                <span className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${
+                  due.overdue ? 'text-amber-500 dark:text-amber-400' : 'text-gray-400 dark:text-gray-500'
+                }`}>
                   <Calendar size={9} />
                   {due.label}
                 </span>
               )}
               {task.reminderTime && !done && (
-                <span
-                  className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${
-                    reminderPast
-                      ? 'text-amber-500 dark:text-amber-400'
-                      : 'text-gray-400 dark:text-gray-500'
-                  }`}
-                >
+                <span className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${
+                  reminderPast ? 'text-amber-500 dark:text-amber-400' : 'text-gray-400 dark:text-gray-500'
+                }`}>
                   <Bell size={9} />
-                  {formatTime(task.reminderTime)}
-                  {reminderPast && ' · Now'}
+                  {formatReminderLabel(task.reminderTime)}
                 </span>
               )}
             </div>
@@ -278,54 +343,60 @@ function TaskRow({ task, onMarkDone, onReopen, onSetStage, onDelete, onUpdateTas
             exit={{ opacity: 0, height: 0 }}
             className="overflow-hidden"
           >
-            <div className="px-4 pb-3 pt-3 flex flex-wrap gap-3 border-t border-gray-100 dark:border-gray-800">
-              <div className="flex items-center gap-1.5">
-                <Calendar size={11} className="text-gray-400 dark:text-gray-500 shrink-0" />
-                <input
-                  type="date"
-                  value={task.dueDate ?? ''}
-                  onChange={e =>
-                    onUpdateTask(task.id, { dueDate: e.target.value || undefined })
-                  }
-                  className="text-[11px] text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 transition-colors cursor-pointer"
-                />
-                {task.dueDate && (
-                  <button
-                    onClick={() => onUpdateTask(task.id, { dueDate: undefined })}
-                    className="text-gray-300 dark:text-gray-600 hover:text-red-400 transition-colors"
-                  >
-                    <X size={11} />
-                  </button>
-                )}
+            <div className="px-4 pb-3 pt-3 border-t border-gray-100 dark:border-gray-800">
+              <div className="flex flex-wrap gap-3">
+                <div className="flex items-center gap-1.5">
+                  <Calendar size={11} className="text-gray-400 dark:text-gray-500 shrink-0" />
+                  <input
+                    type="date"
+                    value={task.dueDate ?? ''}
+                    onChange={e => onUpdateTask(task.id, { dueDate: e.target.value || undefined })}
+                    className="text-[11px] text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 transition-colors cursor-pointer"
+                  />
+                  {task.dueDate && (
+                    <button
+                      onClick={() => onUpdateTask(task.id, { dueDate: undefined })}
+                      className="text-gray-300 dark:text-gray-600 hover:text-red-400 transition-colors"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Clock size={11} className="text-gray-400 dark:text-gray-500 shrink-0" />
+                  <input
+                    type="time"
+                    value={task.reminderTime ? tsToTimeStr(task.reminderTime) : ''}
+                    onChange={e => {
+                      if (!e.target.value) {
+                        onUpdateTask(task.id, { reminderTime: undefined, reminderDismissed: false });
+                        return;
+                      }
+                      onUpdateTask(task.id, {
+                        reminderTime: timeStrToTs(e.target.value),
+                        reminderDismissed: false,
+                      });
+                    }}
+                    className="text-[11px] text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 transition-colors cursor-pointer"
+                  />
+                  {task.reminderTime && (
+                    <button
+                      onClick={() => onUpdateTask(task.id, { reminderTime: undefined, reminderDismissed: false })}
+                      className="text-gray-300 dark:text-gray-600 hover:text-red-400 transition-colors"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-1.5">
-                <Clock size={11} className="text-gray-400 dark:text-gray-500 shrink-0" />
-                <input
-                  type="time"
-                  value={task.reminderTime ? tsToTimeStr(task.reminderTime) : ''}
-                  onChange={e => {
-                    if (!e.target.value) {
-                      onUpdateTask(task.id, { reminderTime: undefined, reminderDismissed: false });
-                      return;
-                    }
-                    onUpdateTask(task.id, {
-                      reminderTime: timeStrToTs(e.target.value),
-                      reminderDismissed: false,
-                    });
-                  }}
-                  className="text-[11px] text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 transition-colors cursor-pointer"
-                />
-                {task.reminderTime && (
-                  <button
-                    onClick={() =>
-                      onUpdateTask(task.id, { reminderTime: undefined, reminderDismissed: false })
-                    }
-                    className="text-gray-300 dark:text-gray-600 hover:text-red-400 transition-colors"
-                  >
-                    <X size={11} />
-                  </button>
-                )}
-              </div>
+              {/* Inline note when reminders aren't enabled */}
+              {task.reminderTime && notifPermission !== 'granted' && notifPermission !== 'unsupported' && (
+                <p className="mt-2 text-[10px] text-gray-400 dark:text-gray-500 leading-relaxed">
+                  {notifPermission === 'denied'
+                    ? 'Reminder saved. Unblock notifications in browser settings to receive alerts.'
+                    : 'Reminder saved. Enable notifications above to receive alerts.'}
+                </p>
+              )}
             </div>
           </motion.div>
         )}
@@ -352,6 +423,8 @@ export default function App() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
 
+  const [notifPermission, setNotifPermission] = useState<NotifPermission>(getNotifPermission);
+
   const [input, setInput] = useState('');
   const [addStage, setAddStage] = useState<Exclude<TaskStage, 'done'>>('next');
   const [dueDate, setDueDate] = useState('');
@@ -362,8 +435,13 @@ export default function App() {
   const [copied, setCopied] = useState(false);
 
   const triggeredIds = useRef(new Set<string>());
+  const firingNotifs = useRef(new Set<string>());
+  const tasksRef = useRef(tasks);
   const importRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Keep tasksRef current without triggering notification effect re-runs
+  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
@@ -374,11 +452,25 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
   }, [tasks]);
 
-  // Auto-focus quick-add on first run
   useEffect(() => {
     if (tasks.length === 0) inputRef.current?.focus();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Prune stale notification history once on mount
+  useEffect(() => { pruneNotifiedSet(); }, []);
+
+  // Watch for external permission changes (e.g. user unblocks in browser settings)
+  useEffect(() => {
+    let status: PermissionStatus | null = null;
+    const handler = () => setNotifPermission(getNotifPermission());
+    navigator.permissions
+      ?.query({ name: 'notifications' as PermissionName })
+      .then(s => { status = s; s.addEventListener('change', handler); })
+      .catch(() => {});
+    return () => { status?.removeEventListener('change', handler); };
+  }, []);
+
+  // In-app alarm toast — 1s poll
   useEffect(() => {
     const id = setInterval(() => {
       const now = Date.now();
@@ -398,6 +490,32 @@ export default function App() {
     return () => clearInterval(id);
   }, [tasks]);
 
+  // Browser notification checker — fires on load + every 60s
+  useEffect(() => {
+    if (notifPermission !== 'granted') return;
+
+    const check = async () => {
+      const now = Date.now();
+      const notifiedSet = loadNotifiedSet();
+      let changed = false;
+      for (const task of tasksRef.current) {
+        if (task.stage === 'done' || !task.reminderTime || task.reminderTime > now) continue;
+        const key = notifKey(task.id, task.reminderTime);
+        if (notifiedSet.has(key) || firingNotifs.current.has(key)) continue;
+        firingNotifs.current.add(key);
+        await fireTaskNotification(task);
+        firingNotifs.current.delete(key);
+        notifiedSet.add(key);
+        changed = true;
+      }
+      if (changed) saveNotifiedSet(notifiedSet);
+    };
+
+    void check();
+    const id = setInterval(() => void check(), 60_000);
+    return () => clearInterval(id);
+  }, [notifPermission]); // only restarts when permission changes
+
   // ── Task actions ──────────────────────────────────────────────────────────────
 
   const update = (fn: (prev: Task[]) => Task[]) => setTasks(prev => fn(prev));
@@ -405,7 +523,6 @@ export default function App() {
   const addTask = () => {
     const text = input.trim();
     if (!text) return;
-
     let reminderTimestamp: number | undefined;
     if (reminderAt) {
       const d = new Date();
@@ -414,7 +531,6 @@ export default function App() {
       if (d.getTime() < Date.now()) d.setDate(d.getDate() + 1);
       reminderTimestamp = d.getTime();
     }
-
     const task: Task = {
       id: crypto.randomUUID(),
       text,
@@ -436,16 +552,12 @@ export default function App() {
   const markDone = (id: string) =>
     update(ts =>
       ts.map(t =>
-        t.id === id
-          ? { ...t, stage: 'done', completedAt: Date.now(), reminderDismissed: true }
-          : t,
+        t.id === id ? { ...t, stage: 'done', completedAt: Date.now(), reminderDismissed: true } : t,
       ),
     );
 
   const reopen = (id: string) =>
-    update(ts =>
-      ts.map(t => (t.id === id ? { ...t, stage: 'next', completedAt: undefined } : t)),
-    );
+    update(ts => ts.map(t => (t.id === id ? { ...t, stage: 'next', completedAt: undefined } : t)));
 
   const setStage = (id: string, stage: TaskStage) =>
     update(ts => ts.map(t => (t.id === id ? { ...t, stage } : t)));
@@ -458,15 +570,14 @@ export default function App() {
   const duplicateTask = (id: string) => {
     const source = tasks.find(t => t.id === id);
     if (!source) return;
-    const dupe: Task = {
+    update(prev => [{
       ...source,
       id: crypto.randomUUID(),
       createdAt: Date.now(),
-      stage: 'next',
+      stage: 'next' as TaskStage,
       completedAt: undefined,
       reminderDismissed: false,
-    };
-    update(prev => [dupe, ...prev]);
+    }, ...prev]);
   };
 
   const clearDone = () => {
@@ -479,27 +590,37 @@ export default function App() {
     setActiveAlarm(null);
   };
 
+  // ── Notification actions ──────────────────────────────────────────────────────
+
+  const requestNotifPermission = async () => {
+    if (!('Notification' in window)) return;
+    const result = await Notification.requestPermission();
+    setNotifPermission(result as NotifPermission);
+  };
+
+  const sendTestNotif = async () => {
+    await fireTaskNotification({
+      id: 'test-' + Date.now(),
+      text: 'Reminders are working!',
+      stage: 'next',
+      createdAt: Date.now(),
+      reminderTime: Date.now(),
+    });
+  };
+
   // ── Derived state ─────────────────────────────────────────────────────────────
 
   const byStage = (s: TaskStage) => tasks.filter(t => t.stage === s);
   const doneTasks = byStage('done');
   const activeTasks = tasks.filter(t => t.stage !== 'done');
-  const progress =
-    tasks.length === 0 ? 0 : Math.round((doneTasks.length / tasks.length) * 100);
-
+  const progress = tasks.length === 0 ? 0 : Math.round((doneTasks.length / tasks.length) * 100);
   const searchQuery = search.trim().toLowerCase();
-  const searchResults = searchQuery
-    ? tasks.filter(t => t.text.toLowerCase().includes(searchQuery))
-    : [];
+  const searchResults = searchQuery ? tasks.filter(t => t.text.toLowerCase().includes(searchQuery)) : [];
 
   // ── Export / Import ───────────────────────────────────────────────────────────
 
   const exportTasks = () => {
-    const payload = JSON.stringify(
-      { version: 1, exportedAt: new Date().toISOString(), tasks },
-      null,
-      2,
-    );
+    const payload = JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), tasks }, null, 2);
     const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
     const a = Object.assign(document.createElement('a'), {
       href: url,
@@ -516,11 +637,7 @@ export default function App() {
     reader.onload = ev => {
       try {
         const raw = JSON.parse(ev.target?.result as string);
-        const arr: any[] = Array.isArray(raw.tasks)
-          ? raw.tasks
-          : Array.isArray(raw)
-          ? raw
-          : null;
+        const arr: any[] = Array.isArray(raw.tasks) ? raw.tasks : Array.isArray(raw) ? raw : null;
         if (!arr) throw new Error('Unrecognised format');
         update(() => arr.map(migrateRaw));
       } catch {
@@ -532,11 +649,7 @@ export default function App() {
   };
 
   const copyPlan = async () => {
-    const date = new Date().toLocaleDateString([], {
-      weekday: 'long',
-      month: 'long',
-      day: 'numeric',
-    });
+    const date = new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
     const lines: string[] = [`My Plan — ${date}`, ''];
     for (const { stage, label } of SECTIONS) {
       const items = tasks.filter(t => t.stage === stage);
@@ -555,9 +668,19 @@ export default function App() {
       await navigator.clipboard.writeText(lines.join('\n'));
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // clipboard unavailable
-    }
+    } catch { /* clipboard unavailable */ }
+  };
+
+  // ── Shared row props helper ───────────────────────────────────────────────────
+
+  const rowProps = {
+    notifPermission,
+    onMarkDone: markDone,
+    onReopen: reopen,
+    onSetStage: setStage,
+    onDelete: deleteTask,
+    onUpdateTask: updateTask,
+    onDuplicate: duplicateTask,
   };
 
   // ── Render ────────────────────────────────────────────────────────────────────
@@ -576,13 +699,11 @@ export default function App() {
               className="fixed inset-x-4 top-6 z-50 flex justify-center pointer-events-none"
             >
               <div className="bg-black text-white px-5 py-3.5 rounded-2xl shadow-2xl flex items-center gap-3 max-w-md w-full pointer-events-auto border border-white/10">
-                <div className="bg-red-500 p-1.5 rounded-full shrink-0">
+                <div className="bg-amber-500 p-1.5 rounded-full shrink-0">
                   <Bell size={15} className="animate-bounce" />
                 </div>
                 <div className="flex-grow min-w-0">
-                  <p className="text-[9px] font-bold text-red-400 uppercase tracking-widest">
-                    Reminder
-                  </p>
+                  <p className="text-[9px] font-bold text-amber-400 uppercase tracking-widest">Reminder</p>
                   <p className="text-sm font-medium truncate">{activeAlarm.text}</p>
                 </div>
                 <button
@@ -605,17 +726,8 @@ export default function App() {
           >
             {dark ? <Sun size={16} /> : <Moon size={16} />}
           </button>
-
-          <motion.div
-            initial={{ opacity: 0, y: -14 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="flex justify-center mb-3"
-          >
-            <img
-              src="/icon-192x192.png"
-              alt="ZenTask"
-              className="w-12 h-12 rounded-2xl shadow-lg"
-            />
+          <motion.div initial={{ opacity: 0, y: -14 }} animate={{ opacity: 1, y: 0 }} className="flex justify-center mb-3">
+            <img src="/icon-192x192.png" alt="ZenTask" className="w-12 h-12 rounded-2xl shadow-lg" />
           </motion.div>
           <motion.h1
             initial={{ opacity: 0 }}
@@ -631,11 +743,7 @@ export default function App() {
             transition={{ delay: 0.15 }}
             className="text-gray-400 dark:text-gray-500 mt-1 text-sm font-light"
           >
-            {new Date().toLocaleDateString([], {
-              weekday: 'long',
-              month: 'long',
-              day: 'numeric',
-            })}
+            {new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })}
           </motion.p>
         </header>
 
@@ -643,12 +751,8 @@ export default function App() {
         {tasks.length > 0 && (
           <div className="mb-7">
             <div className="flex justify-between mb-1.5">
-              <span className="text-[10px] text-gray-400 dark:text-gray-500 font-medium uppercase tracking-wider">
-                Progress
-              </span>
-              <span className="text-[10px] text-gray-500 dark:text-gray-400 font-semibold">
-                {doneTasks.length} / {tasks.length}
-              </span>
+              <span className="text-[10px] text-gray-400 dark:text-gray-500 font-medium uppercase tracking-wider">Progress</span>
+              <span className="text-[10px] text-gray-500 dark:text-gray-400 font-semibold">{doneTasks.length} / {tasks.length}</span>
             </div>
             <div className="h-1 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
               <motion.div
@@ -688,12 +792,7 @@ export default function App() {
             onClick={() => setShowDetails(v => !v)}
             className="mt-2 ml-1 flex items-center gap-1 text-[11px] text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
           >
-            <motion.span
-              animate={{ rotate: showDetails ? 90 : 0 }}
-              className="inline-block leading-none"
-            >
-              ›
-            </motion.span>
+            <motion.span animate={{ rotate: showDetails ? 90 : 0 }} className="inline-block leading-none">›</motion.span>
             {showDetails ? 'Hide options' : 'More options'}
           </button>
 
@@ -707,9 +806,7 @@ export default function App() {
               >
                 <div className="pt-3 px-1 flex flex-wrap gap-x-5 gap-y-3">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[10px] text-gray-400 dark:text-gray-500 uppercase tracking-wider font-medium">
-                      Stage
-                    </span>
+                    <span className="text-[10px] text-gray-400 dark:text-gray-500 uppercase tracking-wider font-medium">Stage</span>
                     {(['now', 'next', 'later'] as const).map(s => (
                       <button
                         key={s}
@@ -724,7 +821,6 @@ export default function App() {
                       </button>
                     ))}
                   </div>
-
                   <div className="flex items-center gap-2">
                     <Calendar size={12} className="text-gray-400 dark:text-gray-500 shrink-0" />
                     <input
@@ -734,7 +830,6 @@ export default function App() {
                       className="text-[11px] text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 transition-colors cursor-pointer"
                     />
                   </div>
-
                   <div className="flex items-center gap-2">
                     <Clock size={12} className="text-gray-400 dark:text-gray-500 shrink-0" />
                     <input
@@ -744,10 +839,7 @@ export default function App() {
                       className="text-[11px] text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 transition-colors cursor-pointer"
                     />
                     {reminderAt && (
-                      <button
-                        onClick={() => setReminderAt('')}
-                        className="text-gray-300 dark:text-gray-600 hover:text-red-400 transition-colors"
-                      >
+                      <button onClick={() => setReminderAt('')} className="text-gray-300 dark:text-gray-600 hover:text-red-400 transition-colors">
                         <X size={12} />
                       </button>
                     )}
@@ -758,12 +850,49 @@ export default function App() {
           </AnimatePresence>
         </div>
 
+        {/* ── Notification status ── */}
+        <div className="mb-5 flex items-center gap-2 min-h-[24px]">
+          {notifPermission === 'unsupported' ? (
+            <>
+              <BellOff size={12} className="text-gray-300 dark:text-gray-700 shrink-0" />
+              <span className="text-[11px] text-gray-300 dark:text-gray-700">Notifications not available in this browser</span>
+            </>
+          ) : notifPermission === 'denied' ? (
+            <>
+              <BellOff size={12} className="text-amber-400 shrink-0" />
+              <span className="text-[11px] text-amber-500 dark:text-amber-400">
+                Reminders blocked — check browser settings to enable
+              </span>
+            </>
+          ) : notifPermission === 'granted' ? (
+            <>
+              <Bell size={12} className="text-green-500 shrink-0" />
+              <span className="text-[11px] text-gray-400 dark:text-gray-500">Reminders on</span>
+              <span className="text-gray-200 dark:text-gray-700">·</span>
+              <button
+                onClick={sendTestNotif}
+                className="text-[11px] text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+              >
+                Send test
+              </button>
+            </>
+          ) : (
+            <>
+              <Bell size={12} className="text-gray-300 dark:text-gray-600 shrink-0" />
+              <span className="text-[11px] text-gray-400 dark:text-gray-500">Reminders off</span>
+              <button
+                onClick={requestNotifPermission}
+                className="text-[11px] px-2 py-0.5 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors font-medium"
+              >
+                Enable
+              </button>
+            </>
+          )}
+        </div>
+
         {/* ── Search ── */}
         <div className="mb-7 relative">
-          <Search
-            size={14}
-            className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-300 dark:text-gray-600 pointer-events-none"
-          />
+          <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-300 dark:text-gray-600 pointer-events-none" />
           <input
             type="text"
             value={search}
@@ -786,48 +915,26 @@ export default function App() {
         {searchQuery ? (
           <div className="space-y-2 mb-8">
             <div className="flex items-center gap-2 mb-2.5">
-              <h2 className="text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">
-                Results
-              </h2>
+              <h2 className="text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">Results</h2>
               {searchResults.length > 0 && (
-                <span className="text-[10px] font-semibold text-gray-300 dark:text-gray-600">
-                  {searchResults.length}
-                </span>
+                <span className="text-[10px] font-semibold text-gray-300 dark:text-gray-600">{searchResults.length}</span>
               )}
             </div>
             {searchResults.length === 0 ? (
-              <p className="text-sm text-gray-300 dark:text-gray-600 font-light px-1 py-4 text-center">
-                No matching tasks.
-              </p>
+              <p className="text-sm text-gray-300 dark:text-gray-600 font-light px-1 py-4 text-center">No matching tasks.</p>
             ) : (
               <AnimatePresence mode="popLayout">
                 {searchResults.map(t => (
-                  <TaskRow
-                    key={t.id}
-                    task={t}
-                    onMarkDone={markDone}
-                    onReopen={reopen}
-                    onSetStage={setStage}
-                    onDelete={deleteTask}
-                    onUpdateTask={updateTask}
-                    onDuplicate={duplicateTask}
-                  />
+                  <TaskRow key={t.id} task={t} {...rowProps} />
                 ))}
               </AnimatePresence>
             )}
           </div>
         ) : (
           <>
-            {/* ── First-run empty state ── */}
             {tasks.length === 0 && (
-              <motion.div
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="text-center py-8 mb-8"
-              >
-                <p className="text-xl font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Plan one small thing.
-                </p>
+              <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="text-center py-8 mb-8">
+                <p className="text-xl font-medium text-gray-700 dark:text-gray-300 mb-2">Plan one small thing.</p>
                 <p className="text-sm text-gray-400 dark:text-gray-500 font-light leading-relaxed max-w-xs mx-auto">
                   Use <span className="font-medium">Now</span> for what's urgent,{' '}
                   <span className="font-medium">Next</span> for soon,{' '}
@@ -836,41 +943,23 @@ export default function App() {
               </motion.div>
             )}
 
-            {/* ── Task sections ── */}
             <div className="space-y-8">
               {SECTIONS.map(({ stage, label, empty }) => {
                 const items = sortByOverdue(byStage(stage));
                 return (
                   <section key={stage}>
                     <div className="flex items-center gap-2 mb-2.5">
-                      <h2 className="text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">
-                        {label}
-                      </h2>
+                      <h2 className="text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-gray-500">{label}</h2>
                       {items.length > 0 && (
-                        <span className="text-[10px] font-semibold text-gray-300 dark:text-gray-600">
-                          {items.length}
-                        </span>
+                        <span className="text-[10px] font-semibold text-gray-300 dark:text-gray-600">{items.length}</span>
                       )}
                     </div>
                     <div className="space-y-2">
                       {items.length === 0 ? (
-                        <p className="text-sm text-gray-300 dark:text-gray-600 font-light px-1 py-2">
-                          {empty}
-                        </p>
+                        <p className="text-sm text-gray-300 dark:text-gray-600 font-light px-1 py-2">{empty}</p>
                       ) : (
                         <AnimatePresence mode="popLayout">
-                          {items.map(t => (
-                            <TaskRow
-                              key={t.id}
-                              task={t}
-                              onMarkDone={markDone}
-                              onReopen={reopen}
-                              onSetStage={setStage}
-                              onDelete={deleteTask}
-                              onUpdateTask={updateTask}
-                              onDuplicate={duplicateTask}
-                            />
-                          ))}
+                          {items.map(t => <TaskRow key={t.id} task={t} {...rowProps} />)}
                         </AnimatePresence>
                       )}
                     </div>
@@ -878,39 +967,20 @@ export default function App() {
                 );
               })}
 
-              {/* ── Done today ── */}
               {doneTasks.length > 0 && (
                 <section>
                   <div className="flex items-center justify-between mb-2.5">
                     <div className="flex items-center gap-2">
-                      <h2 className="text-[10px] font-semibold uppercase tracking-widest text-gray-300 dark:text-gray-600">
-                        Done today
-                      </h2>
-                      <span className="text-[10px] text-gray-200 dark:text-gray-700 font-semibold">
-                        {doneTasks.length}
-                      </span>
+                      <h2 className="text-[10px] font-semibold uppercase tracking-widest text-gray-300 dark:text-gray-600">Done today</h2>
+                      <span className="text-[10px] text-gray-200 dark:text-gray-700 font-semibold">{doneTasks.length}</span>
                     </div>
-                    <button
-                      onClick={clearDone}
-                      className="text-[10px] text-gray-300 dark:text-gray-600 hover:text-red-400 transition-colors font-medium"
-                    >
+                    <button onClick={clearDone} className="text-[10px] text-gray-300 dark:text-gray-600 hover:text-red-400 transition-colors font-medium">
                       Clear
                     </button>
                   </div>
                   <div className="space-y-2">
                     <AnimatePresence mode="popLayout">
-                      {doneTasks.map(t => (
-                        <TaskRow
-                          key={t.id}
-                          task={t}
-                          onMarkDone={markDone}
-                          onReopen={reopen}
-                          onSetStage={setStage}
-                          onDelete={deleteTask}
-                          onUpdateTask={updateTask}
-                          onDuplicate={duplicateTask}
-                        />
-                      ))}
+                      {doneTasks.map(t => <TaskRow key={t.id} task={t} {...rowProps} />)}
                     </AnimatePresence>
                   </div>
                 </section>
@@ -920,46 +990,46 @@ export default function App() {
         )}
 
         {/* ── Footer ── */}
-        <footer className="mt-12 pt-6 border-t border-gray-100 dark:border-gray-800 flex items-center justify-between">
-          <span className="text-[10px] text-gray-300 dark:text-gray-600 font-medium uppercase tracking-widest">
-            {activeTasks.length} active
-          </span>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={copyPlan}
-              disabled={tasks.length === 0}
-              className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              title="Copy today's plan to clipboard"
-            >
-              <Clipboard size={12} />
-              {copied ? 'Copied!' : 'Copy plan'}
-            </button>
-            <span className="text-gray-200 dark:text-gray-700">·</span>
-            <button
-              onClick={exportTasks}
-              className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
-              title="Download task backup"
-            >
-              <Download size={12} />
-              Export
-            </button>
-            <span className="text-gray-200 dark:text-gray-700">·</span>
-            <button
-              onClick={() => importRef.current?.click()}
-              className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
-              title="Import task backup"
-            >
-              <Upload size={12} />
-              Import
-            </button>
-            <input
-              ref={importRef}
-              type="file"
-              accept=".json"
-              onChange={handleImport}
-              className="hidden"
-            />
+        <footer className="mt-12 pt-6 border-t border-gray-100 dark:border-gray-800">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-gray-300 dark:text-gray-600 font-medium uppercase tracking-widest">
+              {activeTasks.length} active
+            </span>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={copyPlan}
+                disabled={tasks.length === 0}
+                className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                title="Copy today's plan to clipboard"
+              >
+                <Clipboard size={12} />
+                {copied ? 'Copied!' : 'Copy plan'}
+              </button>
+              <span className="text-gray-200 dark:text-gray-700">·</span>
+              <button
+                onClick={exportTasks}
+                className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+                title="Download task backup"
+              >
+                <Download size={12} />
+                Export
+              </button>
+              <span className="text-gray-200 dark:text-gray-700">·</span>
+              <button
+                onClick={() => importRef.current?.click()}
+                className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+                title="Import task backup"
+              >
+                <Upload size={12} />
+                Import
+              </button>
+              <input ref={importRef} type="file" accept=".json" onChange={handleImport} className="hidden" />
+            </div>
           </div>
+          <p className="mt-3 text-[10px] text-gray-300 dark:text-gray-700 text-center leading-relaxed">
+            Reminder notifications work while ZenTask is open or when you reopen it.
+            Exact background reminders depend on your browser and device.
+          </p>
         </footer>
 
       </div>

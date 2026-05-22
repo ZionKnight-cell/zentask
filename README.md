@@ -10,7 +10,10 @@ A clean, minimal task manager built with React, Vite, and Tailwind CSS. Installa
 - Move tasks between stages with a single tap
 - Edit due date and reminder on existing tasks via the pencil button
 - Human-friendly due dates (Today, Tomorrow, Overdue, Month Day); overdue tasks float to the top
-- Time-based reminder alarms
+- Time-based reminder alarms with browser notifications (when permission granted)
+- Reminder labels on tasks: "Today 6:30 PM", "Tomorrow 9:00 AM", "Overdue"
+- In-app alarm toast as fallback when browser notifications are off
+- Notification permission UI: enable, status display, send test notification
 - Search / filter tasks across all sections
 - Copy today's plan to clipboard as formatted text
 - Clear completed tasks with confirmation
@@ -51,6 +54,20 @@ Or connect the GitHub repository at [vercel.com](https://vercel.com) for automat
 ## PWA Install
 
 When served over HTTPS (e.g. on Vercel), browsers will offer an **Install** prompt. The app works fully offline after installation.
+
+## Reminder Notifications
+
+ZenTask uses the browser Notification API. Permission is never requested automatically — click **Enable** in the app UI when prompted.
+
+**How reminders work:**
+- Reminders are checked when the app loads and every 60 seconds while open
+- Missed reminders (app was closed) are shown shortly after reopening, if still relevant
+- Each reminder fires once and is tracked in `localStorage` to avoid duplicates across refreshes
+- Browser notifications use `serviceWorkerRegistration.showNotification()` when a service worker is active, falling back to `new Notification()`
+
+**Browser/PWA limitation:** There is no guaranteed background delivery. Reminders only fire when the app is open or when you reopen it. For best results, keep the installed PWA running. Exact background behavior depends on your browser and OS.
+
+**To test locally:** Run `npm run dev`, open the app, click **Enable** in the notification row, then click **Send test** to verify notifications work.
 
 ## Tech Stack
 
