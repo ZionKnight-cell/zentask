@@ -14,7 +14,7 @@ export default defineConfig({
         'favicon.ico',
         'favicon-16x16.png',
         'favicon-32x32.png',
-        'zentask-mark.svg',
+        'favicon-48x48.png',
         'apple-touch-icon.png',
       ],
       manifest: {

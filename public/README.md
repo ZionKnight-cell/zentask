@@ -1,8 +1,21 @@
-# Zentask Option 1 Public Assets
+# Zentask Option 1 — Exact Extracted Assets
 
-Copy all files in this folder into your app's `public/` directory.
+This pack uses the actual Option 1 image you selected as the source.
 
-## Recommended `index.html` tags
+Important:
+- `icon-192x192.png`, `icon-512x512.png`, and `icon-1024x1024.png` are extracted from the selected blue app icon.
+- `favicon.ico` and favicon PNGs are extracted from the selected light favicon preview.
+- `apple-touch-icon.png` is extracted from the selected Apple touch icon preview.
+- `og-image.png` and `twitter-image.png` preserve the selected social card design and proportions.
+- `og-image-1200x630-cropped.png` is included as an optional strict social-card ratio version.
+
+Copy the public files into:
+
+```bash
+~/GitHub/zentask/public
+```
+
+Recommended `index.html` tags:
 
 ```html
 <link rel="icon" href="/favicon.ico" sizes="any" />
@@ -23,22 +36,3 @@ Copy all files in this folder into your app's `public/` directory.
 <meta name="twitter:description" content="Focus. Plan. Complete. Peace of mind." />
 <meta name="twitter:image" content="/twitter-image.png" />
 ```
-
-## Included
-
-- favicon.ico
-- favicon-16x16.png
-- favicon-32x32.png
-- favicon-48x48.png
-- apple-touch-icon.png
-- icon-192x192.png
-- icon-512x512.png
-- maskable-icon-192x192.png
-- maskable-icon-512x512.png
-- og-image.png
-- twitter-image.png
-- feature-graphic.png
-- preview-option-1.png
-- zentask-mark.svg
-- zentask-wordmark.svg
-- site.webmanifest
