@@ -3,9 +3,12 @@
 A clean, minimal task manager built with React, Vite, and Tailwind CSS. Installable as a PWA and deployable to Vercel.
 
 **Features:**
-- Add, complete, and delete tasks
-- Set time-based reminders with alarm notifications
-- Filter tasks by active / all / completed
+- Today-focused task board: Now / Next / Later / Done today sections
+- Quick-add with Enter key; optional stage, due date, and reminder per task
+- Move tasks between stages with a single tap
+- Human-friendly due dates (Today, Tomorrow, Overdue, Month Day)
+- Time-based reminder alarms
+- Export / import JSON backup
 - Progress bar with live stats
 - Fully offline-capable via service worker (PWA)
 - Data persisted in browser localStorage — no account or backend needed

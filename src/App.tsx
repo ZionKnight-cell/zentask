@@ -1,365 +1,631 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useRef, type ChangeEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Plus, Trash2, CheckCircle2, Circle, ListTodo, Filter, Check, X, Bell, Clock, AlertCircle } from 'lucide-react';
+import {
+  Plus, Trash2, CheckCircle2, Circle, ListTodo,
+  Bell, X, Clock, Download, Upload, Calendar, RotateCcw,
+} from 'lucide-react';
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+type TaskStage = 'now' | 'next' | 'later' | 'done';
 
 interface Task {
   id: string;
   text: string;
-  completed: boolean;
+  stage: TaskStage;
   createdAt: number;
-  reminderTime?: number; // timestamp
+  completedAt?: number;
+  dueDate?: string;          // 'YYYY-MM-DD'
+  reminderTime?: number;     // unix timestamp
   reminderDismissed?: boolean;
 }
 
-type FilterType = 'active' | 'all' | 'completed';
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const VALID_STAGES: TaskStage[] = ['now', 'next', 'later', 'done'];
+
+function migrateRaw(raw: any): Task {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    text: String(raw.text ?? ''),
+    stage: VALID_STAGES.includes(raw.stage)
+      ? (raw.stage as TaskStage)
+      : raw.completed ? 'done' : 'next',
+    createdAt: raw.createdAt ?? Date.now(),
+    completedAt: raw.completedAt,
+    dueDate: typeof raw.dueDate === 'string' ? raw.dueDate : undefined,
+    reminderTime: typeof raw.reminderTime === 'number' ? raw.reminderTime : undefined,
+    reminderDismissed: Boolean(raw.reminderDismissed),
+  };
+}
+
+function formatDue(dateStr: string): { label: string; overdue: boolean } {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const due = new Date(dateStr + 'T00:00:00');
+  const diff = Math.round((due.getTime() - today.getTime()) / 86_400_000);
+  if (diff < 0) return { label: 'Overdue', overdue: true };
+  if (diff === 0) return { label: 'Today', overdue: false };
+  if (diff === 1) return { label: 'Tomorrow', overdue: false };
+  return {
+    label: due.toLocaleDateString([], { month: 'short', day: 'numeric' }),
+    overdue: false,
+  };
+}
+
+function formatTime(ts: number) {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+const STORAGE_KEY = 'zentask_tasks';
+
+const SECTIONS: { stage: Exclude<TaskStage, 'done'>; label: string; empty: string }[] = [
+  { stage: 'now',  label: 'Now',  empty: 'Nothing urgent right now.' },
+  { stage: 'next', label: 'Next', empty: 'Add what you want to handle soon.' },
+  { stage: 'later',label: 'Later',empty: 'Park low-pressure tasks here.' },
+];
+
+// ── TaskRow ───────────────────────────────────────────────────────────────────
+
+interface RowProps {
+  task: Task;
+  onMarkDone: (id: string) => void;
+  onReopen: (id: string) => void;
+  onSetStage: (id: string, stage: TaskStage) => void;
+  onDelete: (id: string) => void;
+}
+
+function TaskRow({ task, onMarkDone, onReopen, onSetStage, onDelete }: RowProps) {
+  const done = task.stage === 'done';
+  const due = task.dueDate ? formatDue(task.dueDate) : null;
+  const reminderPast =
+    !done && task.reminderTime && task.reminderTime <= Date.now() && !task.reminderDismissed;
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -4, transition: { duration: 0.15 } }}
+      className={`group flex items-start gap-3 p-4 rounded-2xl border transition-colors ${
+        done
+          ? 'bg-gray-50/50 border-gray-100'
+          : 'bg-white border-gray-200 shadow-sm hover:border-gray-300'
+      }`}
+    >
+      {/* Circle */}
+      <button
+        onClick={() => (done ? onReopen(task.id) : onMarkDone(task.id))}
+        className={`flex-shrink-0 mt-0.5 transition-colors ${
+          done ? 'text-green-400' : 'text-gray-300 hover:text-gray-500'
+        }`}
+        title={done ? 'Reopen task' : 'Mark as done'}
+      >
+        {done ? <CheckCircle2 size={20} /> : <Circle size={20} />}
+      </button>
+
+      {/* Text + meta */}
+      <div className="flex-grow min-w-0">
+        <span
+          className={`text-[15px] leading-snug ${
+            done ? 'text-gray-400 line-through' : 'text-gray-700'
+          }`}
+        >
+          {task.text}
+        </span>
+
+        {(due || (task.reminderTime && !done)) && (
+          <div className="flex flex-wrap items-center gap-3 mt-1.5">
+            {due && (
+              <span
+                className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${
+                  due.overdue ? 'text-red-500' : 'text-gray-400'
+                }`}
+              >
+                <Calendar size={9} />
+                {due.label}
+              </span>
+            )}
+            {task.reminderTime && !done && (
+              <span
+                className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${
+                  reminderPast ? 'text-red-500' : 'text-gray-400'
+                }`}
+              >
+                <Bell size={9} />
+                {formatTime(task.reminderTime)}
+                {reminderPast && ' · Now'}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Controls — visible at low opacity, full on hover/focus */}
+      <div className="flex-shrink-0 flex items-center gap-1 opacity-40 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+        {done ? (
+          <button
+            onClick={() => onReopen(task.id)}
+            title="Move back to Next"
+            className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            <RotateCcw size={13} />
+          </button>
+        ) : (
+          <select
+            value={task.stage}
+            onChange={e => onSetStage(task.id, e.target.value as TaskStage)}
+            className="text-[11px] text-gray-400 bg-gray-50 border border-gray-100 rounded-lg px-1.5 py-1 focus:outline-none hover:border-gray-300 cursor-pointer transition-colors"
+            title="Move to stage"
+          >
+            <option value="now">Now</option>
+            <option value="next">Next</option>
+            <option value="later">Later</option>
+          </select>
+        )}
+        <button
+          onClick={() => onDelete(task.id)}
+          title="Delete task"
+          className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
+    </motion.div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [tasks, setTasks] = useState<Task[]>(() => {
-    const saved = localStorage.getItem('zentask_tasks');
-    return saved ? JSON.parse(saved) : [];
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? (JSON.parse(raw) as any[]).map(migrateRaw) : [];
+    } catch {
+      return [];
+    }
   });
-  const [inputValue, setInputValue] = useState('');
-  const [reminderAt, setReminderAt] = useState('');
-  const [filter, setFilter] = useState<FilterType>('active');
-  const [activeAlarm, setActiveAlarm] = useState<Task | null>(null);
-  
-  // Ref to track which reminders have already triggered to avoid duplicate alerts in a single session
-  const triggeredIds = useRef<Set<string>>(new Set());
 
+  const [input, setInput] = useState('');
+  const [addStage, setAddStage] = useState<Exclude<TaskStage, 'done'>>('next');
+  const [dueDate, setDueDate] = useState('');
+  const [reminderAt, setReminderAt] = useState('');
+  const [showDetails, setShowDetails] = useState(false);
+  const [activeAlarm, setActiveAlarm] = useState<Task | null>(null);
+
+  const triggeredIds = useRef(new Set<string>());
+  const importRef = useRef<HTMLInputElement>(null);
+
+  // Persist to localStorage
   useEffect(() => {
-    localStorage.setItem('zentask_tasks', JSON.stringify(tasks));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
   }, [tasks]);
 
-  // Alarm checking interval
+  // Reminder alarm polling
   useEffect(() => {
-    const interval = setInterval(() => {
+    const id = setInterval(() => {
       const now = Date.now();
-      const triggered = tasks.find(t => 
-        !t.completed && 
-        t.reminderTime && 
-        t.reminderTime <= now && 
-        !t.reminderDismissed && 
-        !triggeredIds.current.has(t.id)
+      const hit = tasks.find(
+        t =>
+          t.stage !== 'done' &&
+          t.reminderTime &&
+          t.reminderTime <= now &&
+          !t.reminderDismissed &&
+          !triggeredIds.current.has(t.id),
       );
-
-      if (triggered) {
-        setActiveAlarm(triggered);
-        triggeredIds.current.add(triggered.id);
+      if (hit) {
+        setActiveAlarm(hit);
+        triggeredIds.current.add(hit.id);
       }
     }, 1000);
-
-    return () => clearInterval(interval);
+    return () => clearInterval(id);
   }, [tasks]);
 
+  // ── Task actions ────────────────────────────────────────────────────────────
+
+  const update = (fn: (prev: Task[]) => Task[]) => setTasks(prev => fn(prev));
+
   const addTask = () => {
-    if (!inputValue.trim()) return;
-    
+    const text = input.trim();
+    if (!text) return;
+
     let reminderTimestamp: number | undefined;
     if (reminderAt) {
-      const date = new Date();
-      const [hours, minutes] = reminderAt.split(':').map(Number);
-      date.setHours(hours, minutes, 0, 0);
-      
-      // If time is in the past, assume it's for tomorrow
-      if (date.getTime() < Date.now()) {
-        date.setDate(date.getDate() + 1);
-      }
-      reminderTimestamp = date.getTime();
+      const d = new Date();
+      const [h, m] = reminderAt.split(':').map(Number);
+      d.setHours(h, m, 0, 0);
+      if (d.getTime() < Date.now()) d.setDate(d.getDate() + 1);
+      reminderTimestamp = d.getTime();
     }
 
-    const newTask: Task = {
+    const task: Task = {
       id: crypto.randomUUID(),
-      text: inputValue.trim(),
-      completed: false,
+      text,
+      stage: addStage,
       createdAt: Date.now(),
+      dueDate: dueDate || undefined,
       reminderTime: reminderTimestamp,
       reminderDismissed: false,
     };
-    setTasks([newTask, ...tasks]);
-    setInputValue('');
+    update(prev => [task, ...prev]);
+    setInput('');
+    setDueDate('');
     setReminderAt('');
   };
 
-  const toggleTask = (id: string) => {
-    setTasks(tasks.map(t => t.id === id ? { ...t, completed: !t.completed, reminderDismissed: t.completed ? t.reminderDismissed : true } : t));
-  };
+  const markDone = (id: string) =>
+    update(ts =>
+      ts.map(t =>
+        t.id === id
+          ? { ...t, stage: 'done', completedAt: Date.now(), reminderDismissed: true }
+          : t,
+      ),
+    );
+
+  const reopen = (id: string) =>
+    update(ts =>
+      ts.map(t => (t.id === id ? { ...t, stage: 'next', completedAt: undefined } : t)),
+    );
+
+  const setStage = (id: string, stage: TaskStage) =>
+    update(ts => ts.map(t => (t.id === id ? { ...t, stage } : t)));
 
   const deleteTask = (id: string) => {
-    setTasks(tasks.filter(t => t.id !== id));
+    update(ts => ts.filter(t => t.id !== id));
     if (activeAlarm?.id === id) setActiveAlarm(null);
   };
 
-  const clearCompleted = () => {
-    setTasks(tasks.filter(t => !t.completed));
-  };
+  const clearDone = () => update(ts => ts.filter(t => t.stage !== 'done'));
 
   const dismissAlarm = (id: string) => {
-    setTasks(tasks.map(t => t.id === id ? { ...t, reminderDismissed: true } : t));
+    update(ts => ts.map(t => (t.id === id ? { ...t, reminderDismissed: true } : t)));
     setActiveAlarm(null);
   };
 
-  const filteredTasks = useMemo(() => {
-    switch (filter) {
-      case 'active': return tasks.filter(t => !t.completed);
-      case 'completed': return tasks.filter(t => t.completed);
-      default: return tasks;
-    }
-  }, [tasks, filter]);
+  // ── Export / Import ─────────────────────────────────────────────────────────
 
-  const stats = {
-    total: tasks.length,
-    completed: tasks.filter(t => t.completed).length,
-    active: tasks.filter(t => !t.completed).length,
-    progress: tasks.length === 0 ? 0 : Math.round((tasks.filter(t => t.completed).length / tasks.length) * 100),
+  const exportTasks = () => {
+    const payload = JSON.stringify(
+      { version: 1, exportedAt: new Date().toISOString(), tasks },
+      null,
+      2,
+    );
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+    const a = Object.assign(document.createElement('a'), {
+      href: url,
+      download: `zentask-${new Date().toISOString().slice(0, 10)}.json`,
+    });
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
-  const formatTime = (ts: number) => {
-    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const handleImport = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const raw = JSON.parse(ev.target?.result as string);
+        const arr: any[] = Array.isArray(raw.tasks)
+          ? raw.tasks
+          : Array.isArray(raw)
+          ? raw
+          : null;
+        if (!arr) throw new Error('Unrecognised format');
+        update(() => arr.map(migrateRaw));
+      } catch {
+        alert('Could not import — please use a valid ZenTask backup file.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
   };
+
+  // ── Derived state ───────────────────────────────────────────────────────────
+
+  const byStage = (s: TaskStage) => tasks.filter(t => t.stage === s);
+  const doneTasks = byStage('done');
+  const activeTasks = tasks.filter(t => t.stage !== 'done');
+  const progress =
+    tasks.length === 0 ? 0 : Math.round((doneTasks.length / tasks.length) * 100);
+
+
+  // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8 font-sans transition-colors duration-500">
-      <div className="max-w-xl mx-auto relative">
-        {/* Alarm Display */}
+    <div className="min-h-screen py-10 px-4 sm:px-6 lg:px-8 font-sans">
+      <div className="max-w-xl mx-auto">
+
+        {/* ── Alarm toast ── */}
         <AnimatePresence>
           {activeAlarm && (
             <motion.div
-              initial={{ opacity: 0, y: -100, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -100, scale: 0.9 }}
-              className="fixed inset-x-4 top-8 z-50 flex justify-center pointer-events-none"
+              initial={{ opacity: 0, y: -70 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -70 }}
+              className="fixed inset-x-4 top-6 z-50 flex justify-center pointer-events-none"
             >
-              <div className="bg-black text-white px-6 py-4 rounded-3xl shadow-2xl flex items-center gap-4 border border-white/20 pointer-events-auto max-w-md w-full animate-pulse-subtle">
-                <div className="bg-red-500 p-2 rounded-full">
-                  <Bell className="animate-bounce" size={24} />
+              <div className="bg-black text-white px-5 py-3.5 rounded-2xl shadow-2xl flex items-center gap-3 max-w-md w-full pointer-events-auto border border-white/10">
+                <div className="bg-red-500 p-1.5 rounded-full shrink-0">
+                  <Bell size={15} className="animate-bounce" />
                 </div>
-                <div className="flex-grow">
-                  <p className="text-xs font-semibold text-red-400 uppercase tracking-widest mb-0.5">Reminder</p>
-                  <p className="text-sm font-medium leading-tight">{activeAlarm.text}</p>
+                <div className="flex-grow min-w-0">
+                  <p className="text-[9px] font-bold text-red-400 uppercase tracking-widest">
+                    Reminder
+                  </p>
+                  <p className="text-sm font-medium truncate">{activeAlarm.text}</p>
                 </div>
-                <button 
+                <button
                   onClick={() => dismissAlarm(activeAlarm.id)}
-                  className="bg-white/10 hover:bg-white/20 p-2 rounded-full transition-colors"
+                  className="p-1.5 rounded-full hover:bg-white/10 transition-colors shrink-0"
                 >
-                  <X size={20} />
+                  <X size={15} />
                 </button>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* Header */}
-        <header className="mb-12 text-center">
+        {/* ── Header ── */}
+        <header className="mb-8 text-center">
           <motion.div
-            initial={{ opacity: 0, y: -20 }}
+            initial={{ opacity: 0, y: -14 }}
             animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-black text-white mb-4 shadow-lg"
+            className="inline-flex items-center justify-center w-11 h-11 rounded-2xl bg-black text-white mb-3 shadow-lg"
           >
-            <ListTodo size={24} />
+            <ListTodo size={22} />
           </motion.div>
           <motion.h1
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: 0.1 }}
-            className="text-4xl font-semibold tracking-tight text-gray-900"
+            className="text-3xl font-semibold tracking-tight text-gray-900"
           >
             ZenTask
           </motion.h1>
           <motion.p
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ delay: 0.2 }}
-            className="text-gray-500 mt-2 font-light"
+            transition={{ delay: 0.15 }}
+            className="text-gray-400 mt-1 text-sm font-light"
           >
-            Focus on what matters, one step at a time.
+            {new Date().toLocaleDateString([], {
+              weekday: 'long',
+              month: 'long',
+              day: 'numeric',
+            })}
           </motion.p>
         </header>
 
-        {/* Progress Bar */}
+        {/* ── Progress bar ── */}
         {tasks.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, scaleX: 0 }}
-            animate={{ opacity: 1, scaleX: 1 }}
-            className="mb-8"
-          >
-            <div className="flex justify-between items-end mb-2">
-              <span className="text-xs font-medium text-gray-400 uppercase tracking-wider">Progress</span>
-              <span className="text-xs font-semibold text-gray-900">{stats.progress}%</span>
+          <div className="mb-7">
+            <div className="flex justify-between mb-1.5">
+              <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">
+                Progress
+              </span>
+              <span className="text-[10px] text-gray-500 font-semibold">
+                {doneTasks.length} / {tasks.length}
+              </span>
             </div>
-            <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
+            <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
               <motion.div
-                initial={{ width: 0 }}
-                animate={{ width: `${stats.progress}%` }}
+                animate={{ width: `${progress}%` }}
                 transition={{ type: 'spring', bounce: 0, duration: 0.5 }}
                 className="h-full bg-black rounded-full"
               />
             </div>
-          </motion.div>
+          </div>
         )}
 
-        {/* Input Area */}
-        <div className="space-y-4 mb-10">
-          <div className="relative group">
+        {/* ── Quick-add ── */}
+        <div className="mb-8">
+          <div className="relative">
             <input
               type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addTask()}
-              placeholder="What needs to be done?"
-              className="w-full pl-5 pr-14 py-4 bg-white border border-gray-200 rounded-2xl focus:outline-none focus:ring-4 focus:ring-black/5 focus:border-black transition-all shadow-sm placeholder:text-gray-400 text-gray-900"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') addTask();
+                if (e.key === 'Escape') setInput('');
+              }}
+              placeholder="What needs doing?"
+              className="w-full pl-5 pr-14 py-4 bg-white border border-gray-200 rounded-2xl focus:outline-none focus:ring-4 focus:ring-black/5 focus:border-black transition-all shadow-sm placeholder:text-gray-300 text-gray-900"
             />
             <button
               onClick={addTask}
-              disabled={!inputValue.trim()}
-              className="absolute right-2 top-2 bottom-2 px-4 bg-black text-white rounded-xl hover:bg-gray-800 disabled:bg-gray-200 disabled:cursor-not-allowed transition-colors"
+              disabled={!input.trim()}
+              className="absolute right-2 top-2 bottom-2 px-3.5 bg-black text-white rounded-xl hover:bg-gray-800 disabled:bg-gray-200 disabled:cursor-not-allowed transition-colors"
             >
-              <Plus size={20} />
+              <Plus size={18} />
             </button>
           </div>
-          
-          <div className="flex items-center gap-3 px-1">
-            <div className="flex items-center gap-2 text-gray-400 text-xs font-medium uppercase tracking-wider">
-              <Clock size={14} />
-              Set Reminder:
-            </div>
-            <input 
-              type="time" 
-              value={reminderAt}
-              onChange={(e) => setReminderAt(e.target.value)}
-              className="bg-white border border-gray-200 px-3 py-1.5 rounded-xl text-xs font-medium focus:border-black focus:outline-none transition-all cursor-pointer"
-            />
-            {reminderAt && (
-              <button 
-                onClick={() => setReminderAt('')}
-                className="text-gray-400 hover:text-red-500 transition-colors"
-                title="Clear reminder"
+
+          {/* Collapsible options */}
+          <button
+            onClick={() => setShowDetails(v => !v)}
+            className="mt-2 ml-1 flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600 transition-colors"
+          >
+            <motion.span
+              animate={{ rotate: showDetails ? 90 : 0 }}
+              className="inline-block leading-none"
+            >
+              ›
+            </motion.span>
+            {showDetails ? 'Hide options' : 'More options'}
+          </button>
+
+          <AnimatePresence>
+            {showDetails && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                className="overflow-hidden"
               >
-                <X size={14} />
-              </button>
+                <div className="pt-3 px-1 flex flex-wrap gap-x-5 gap-y-3">
+                  {/* Stage */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[10px] text-gray-400 uppercase tracking-wider font-medium">
+                      Stage
+                    </span>
+                    {(['now', 'next', 'later'] as const).map(s => (
+                      <button
+                        key={s}
+                        onClick={() => setAddStage(s)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                          addStage === s
+                            ? 'bg-black text-white'
+                            : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                        }`}
+                      >
+                        {s.charAt(0).toUpperCase() + s.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Due date */}
+                  <div className="flex items-center gap-2">
+                    <Calendar size={12} className="text-gray-400 shrink-0" />
+                    <input
+                      type="date"
+                      value={dueDate}
+                      onChange={e => setDueDate(e.target.value)}
+                      className="text-[11px] text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 focus:outline-none focus:border-gray-400 transition-colors cursor-pointer"
+                    />
+                  </div>
+
+                  {/* Reminder */}
+                  <div className="flex items-center gap-2">
+                    <Clock size={12} className="text-gray-400 shrink-0" />
+                    <input
+                      type="time"
+                      value={reminderAt}
+                      onChange={e => setReminderAt(e.target.value)}
+                      className="text-[11px] text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 focus:outline-none focus:border-gray-400 transition-colors cursor-pointer"
+                    />
+                    {reminderAt && (
+                      <button
+                        onClick={() => setReminderAt('')}
+                        className="text-gray-300 hover:text-red-400 transition-colors"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </motion.div>
             )}
-          </div>
+          </AnimatePresence>
         </div>
 
-        {/* Filters */}
-        {tasks.length > 0 && (
-          <div className="flex items-center justify-between mb-6 px-1">
-            <div className="flex gap-1 p-1 bg-gray-100 rounded-xl">
-              {(['active', 'all', 'completed'] as FilterType[]).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className={`px-4 py-1.5 text-xs font-medium rounded-lg transition-all ${
-                    filter === f
-                      ? 'bg-white text-black shadow-sm'
-                      : 'text-gray-500 hover:text-gray-700'
-                  }`}
-                >
-                  {f.charAt(0).toUpperCase() + f.slice(1)}
-                </button>
-              ))}
-            </div>
-            {stats.completed > 0 && (
-              <button
-                onClick={clearCompleted}
-                className="text-xs font-medium text-gray-400 hover:text-red-500 transition-colors flex items-center gap-1"
-              >
-                Clear completed
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Task List */}
-        <div className="space-y-3">
-          <AnimatePresence mode="popLayout">
-            {filteredTasks.map((task) => (
-              <motion.div
-                key={task.id}
-                layout
-                initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.2 } }}
-                className={`group flex items-center gap-4 p-4 rounded-2xl border transition-all ${
-                  task.completed
-                    ? 'bg-gray-50/50 border-gray-100'
-                    : 'bg-white border-gray-200 shadow-sm hover:border-gray-300'
-                }`}
-              >
-                <button
-                  onClick={() => toggleTask(task.id)}
-                  className={`flex-shrink-0 transition-colors ${
-                    task.completed ? 'text-green-500' : 'text-gray-300 hover:text-gray-400'
-                  }`}
-                >
-                  {task.completed ? <CheckCircle2 size={22} /> : <Circle size={22} />}
-                </button>
-                <div 
-                  onClick={() => toggleTask(task.id)}
-                  className="flex-grow flex flex-col cursor-pointer"
-                >
-                  <span
-                    className={`text-[15px] transition-all leading-tight ${
-                      task.completed ? 'text-gray-400 line-through' : 'text-gray-700'
-                    }`}
-                  >
-                    {task.text}
-                  </span>
-                  {task.reminderTime && !task.completed && (
-                    <div className={`flex items-center gap-1 mt-1.5 text-[10px] uppercase tracking-wider font-bold ${
-                      task.reminderTime <= Date.now() && !task.reminderDismissed ? 'text-red-500' : 'text-gray-400'
-                    }`}>
-                      <Bell size={10} />
-                      {formatTime(task.reminderTime)}
-                      {task.reminderTime <= Date.now() && !task.reminderDismissed && " • Triggered"}
-                    </div>
+        {/* ── Task sections ── */}
+        <div className="space-y-8">
+          {SECTIONS.map(({ stage, label, empty }) => {
+            const items = byStage(stage);
+            return (
+              <section key={stage}>
+                <div className="flex items-center gap-2 mb-2.5">
+                  <h2 className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">
+                    {label}
+                  </h2>
+                  {items.length > 0 && (
+                    <span className="text-[10px] font-semibold text-gray-300">{items.length}</span>
                   )}
                 </div>
-                <button
-                  onClick={() => deleteTask(task.id)}
-                  className="opacity-0 group-hover:opacity-100 p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                >
-                  <Trash2 size={18} />
-                </button>
-              </motion.div>
-            ))}
-          </AnimatePresence>
+                <div className="space-y-2">
+                  {items.length === 0 ? (
+                    <p className="text-sm text-gray-300 font-light px-1 py-2">{empty}</p>
+                  ) : (
+                    <AnimatePresence mode="popLayout">
+                      {items.map(t => (
+                        <TaskRow
+                          key={t.id}
+                          task={t}
+                          onMarkDone={markDone}
+                          onReopen={reopen}
+                          onSetStage={setStage}
+                          onDelete={deleteTask}
+                        />
+                      ))}
+                    </AnimatePresence>
+                  )}
+                </div>
+              </section>
+            );
+          })}
 
-          {/* Empty States */}
-          {filteredTasks.length === 0 && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="py-20 text-center"
-            >
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-50 text-gray-300 mb-4">
-                {filter === 'completed' ? <Check size={32} /> : <Filter size={32} />}
+          {/* Done today */}
+          {doneTasks.length > 0 && (
+            <section>
+              <div className="flex items-center justify-between mb-2.5">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[10px] font-semibold uppercase tracking-widest text-gray-300">
+                    Done today
+                  </h2>
+                  <span className="text-[10px] text-gray-200 font-semibold">
+                    {doneTasks.length}
+                  </span>
+                </div>
+                <button
+                  onClick={clearDone}
+                  className="text-[10px] text-gray-300 hover:text-red-400 transition-colors font-medium"
+                >
+                  Clear
+                </button>
               </div>
-              <p className="text-gray-400 font-light">
-                {filter === 'all'
-                  ? "Your list is empty. Time to start something new."
-                  : filter === 'active'
-                  ? "All caught up! Nothing left to do."
-                  : "No completed tasks yet."}
-              </p>
-            </motion.div>
+              <div className="space-y-2">
+                <AnimatePresence mode="popLayout">
+                  {doneTasks.map(t => (
+                    <TaskRow
+                      key={t.id}
+                      task={t}
+                      onMarkDone={markDone}
+                      onReopen={reopen}
+                      onSetStage={setStage}
+                      onDelete={deleteTask}
+                    />
+                  ))}
+                </AnimatePresence>
+              </div>
+            </section>
           )}
         </div>
 
-        {/* Footer Stats */}
-        {tasks.length > 0 && (
-          <motion.footer
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="mt-12 pt-8 border-t border-gray-100 flex justify-between items-center text-[11px] uppercase tracking-widest text-gray-400 font-medium"
-          >
-            <div>{stats.active} items left</div>
-            <div className="flex gap-4">
-              <span>{stats.completed} completed</span>
-              <span className="text-gray-200">|</span>
-              <span>{stats.total} total</span>
-            </div>
-          </motion.footer>
-        )}
+        {/* ── Footer ── */}
+        <footer className="mt-12 pt-6 border-t border-gray-100 flex items-center justify-between">
+          <span className="text-[10px] text-gray-300 font-medium uppercase tracking-widest">
+            {activeTasks.length} active
+          </span>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={exportTasks}
+              className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 hover:text-gray-700 transition-colors"
+              title="Download task backup"
+            >
+              <Download size={12} />
+              Export
+            </button>
+            <span className="text-gray-200">·</span>
+            <button
+              onClick={() => importRef.current?.click()}
+              className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 hover:text-gray-700 transition-colors"
+              title="Import task backup"
+            >
+              <Upload size={12} />
+              Import
+            </button>
+            <input
+              ref={importRef}
+              type="file"
+              accept=".json"
+              onChange={handleImport}
+              className="hidden"
+            />
+          </div>
+        </footer>
+
       </div>
     </div>
   );
