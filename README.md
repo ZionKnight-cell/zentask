@@ -1,20 +1,56 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# ZenTask
 
-# Run and deploy your AI Studio app
+A clean, minimal task manager built with React, Vite, and Tailwind CSS. Installable as a PWA and deployable to Vercel.
 
-This contains everything you need to run your app locally.
+**Features:**
+- Add, complete, and delete tasks
+- Set time-based reminders with alarm notifications
+- Filter tasks by active / all / completed
+- Progress bar with live stats
+- Fully offline-capable via service worker (PWA)
+- Data persisted in browser localStorage — no account or backend needed
 
-View your app in AI Studio: https://ai.studio/apps/43135825-dbde-4bc4-a911-cccca9236d19
+## Local Development
 
-## Run Locally
+**Prerequisites:** Node.js 18+
 
-**Prerequisites:**  Node.js
+```bash
+npm install
+npm run dev
+```
 
+Open [http://localhost:5173](http://localhost:5173).
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Build
+
+```bash
+npm run build     # type-check + Vite build
+npm run preview   # preview the production build locally
+```
+
+## Deploy to Vercel
+
+This project includes a `vercel.json` for zero-config Vercel deployment:
+
+```bash
+vercel deploy --prod
+```
+
+Or connect the GitHub repository at [vercel.com](https://vercel.com) for automatic deployments on every push.
+
+## PWA Install
+
+When served over HTTPS (e.g. on Vercel), browsers will offer an **Install** prompt. The app works fully offline after installation.
+
+## Tech Stack
+
+- [React 19](https://react.dev)
+- [Vite 6](https://vite.dev)
+- [Tailwind CSS v4](https://tailwindcss.com)
+- [Motion](https://motion.dev) (animations)
+- [Lucide React](https://lucide.dev) (icons)
+- [vite-plugin-pwa](https://vite-pwa-org.netlify.app)
+
+## Repository
+
+[github.com/ZionKnight-cell/zentask](https://github.com/ZionKnight-cell/zentask)
